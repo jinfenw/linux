@@ -268,6 +268,9 @@ struct hugetlbfs_sb_info {
 	spinlock_t	stat_lock;
 	struct hstate *hstate;
 	struct hugepage_subpool *spool;
+	kuid_t	uid;
+	kgid_t	gid;
+	umode_t mode;
 };
 
 static inline struct hugetlbfs_sb_info *HUGETLBFS_SB(struct super_block *sb)
@@ -355,6 +358,7 @@ int huge_add_to_page_cache(struct page *page, struct address_space *mapping,
 			pgoff_t idx);
 
 /* arch callback */
+int __init __alloc_bootmem_huge_page(struct hstate *h);
 int __init alloc_bootmem_huge_page(struct hstate *h);
 
 void __init hugetlb_bad_size(void);

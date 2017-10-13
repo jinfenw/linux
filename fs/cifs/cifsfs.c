@@ -461,6 +461,8 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 		seq_puts(s, ",nocase");
 	if (tcon->retry)
 		seq_puts(s, ",hard");
+	else
+		seq_puts(s, ",soft");
 	if (tcon->use_persistent)
 		seq_puts(s, ",persistenthandles");
 	else if (tcon->use_resilient)
@@ -1354,7 +1356,7 @@ init_cifs(void)
 	spin_lock_init(&cifs_tcp_ses_lock);
 	spin_lock_init(&GlobalMid_Lock);
 
-	get_random_bytes(&cifs_lock_secret, sizeof(cifs_lock_secret));
+	cifs_lock_secret = get_random_u32();
 
 	if (cifs_max_pending < 2) {
 		cifs_max_pending = 2;
@@ -1447,7 +1449,7 @@ exit_cifs(void)
 	exit_cifs_idmap();
 #endif
 #ifdef CONFIG_CIFS_UPCALL
-	unregister_key_type(&cifs_spnego_key_type);
+	exit_cifs_spnego();
 #endif
 	cifs_destroy_request_bufs();
 	cifs_destroy_mids();

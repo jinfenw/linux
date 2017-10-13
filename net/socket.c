@@ -652,6 +652,20 @@ int kernel_sendmsg(struct socket *sock, struct msghdr *msg,
 }
 EXPORT_SYMBOL(kernel_sendmsg);
 
+int kernel_sendmsg_locked(struct sock *sk, struct msghdr *msg,
+			  struct kvec *vec, size_t num, size_t size)
+{
+	struct socket *sock = sk->sk_socket;
+
+	if (!sock->ops->sendmsg_locked)
+		return sock_no_sendmsg_locked(sk, msg, size);
+
+	iov_iter_kvec(&msg->msg_iter, WRITE | ITER_KVEC, vec, num, size);
+
+	return sock->ops->sendmsg_locked(sk, msg, msg_data_left(msg));
+}
+EXPORT_SYMBOL(kernel_sendmsg_locked);
+
 static bool skb_is_err_queue(const struct sk_buff *skb)
 {
 	/* pkt_type of skbs enqueued on the error queue are set to
@@ -1910,22 +1924,18 @@ static int copy_msghdr_from_user(struct msghdr *kmsg,
 				 struct sockaddr __user **save_addr,
 				 struct iovec **iov)
 {
-	struct sockaddr __user *uaddr;
-	struct iovec __user *uiov;
-	size_t nr_segs;
+	struct user_msghdr msg;
 	ssize_t err;
 
-	if (!access_ok(VERIFY_READ, umsg, sizeof(*umsg)) ||
-	    __get_user(uaddr, &umsg->msg_name) ||
-	    __get_user(kmsg->msg_namelen, &umsg->msg_namelen) ||
-	    __get_user(uiov, &umsg->msg_iov) ||
-	    __get_user(nr_segs, &umsg->msg_iovlen) ||
-	    __get_user(kmsg->msg_control, &umsg->msg_control) ||
-	    __get_user(kmsg->msg_controllen, &umsg->msg_controllen) ||
-	    __get_user(kmsg->msg_flags, &umsg->msg_flags))
+	if (copy_from_user(&msg, umsg, sizeof(*umsg)))
 		return -EFAULT;
 
-	if (!uaddr)
+	kmsg->msg_control = (void __force *)msg.msg_control;
+	kmsg->msg_controllen = msg.msg_controllen;
+	kmsg->msg_flags = msg.msg_flags;
+
+	kmsg->msg_namelen = msg.msg_namelen;
+	if (!msg.msg_name)
 		kmsg->msg_namelen = 0;
 
 	if (kmsg->msg_namelen < 0)
@@ -1935,11 +1945,12 @@ static int copy_msghdr_from_user(struct msghdr *kmsg,
 		kmsg->msg_namelen = sizeof(struct sockaddr_storage);
 
 	if (save_addr)
-		*save_addr = uaddr;
+		*save_addr = msg.msg_name;
 
-	if (uaddr && kmsg->msg_namelen) {
+	if (msg.msg_name && kmsg->msg_namelen) {
 		if (!save_addr) {
-			err = move_addr_to_kernel(uaddr, kmsg->msg_namelen,
+			err = move_addr_to_kernel(msg.msg_name,
+						  kmsg->msg_namelen,
 						  kmsg->msg_name);
 			if (err < 0)
 				return err;
@@ -1949,12 +1960,13 @@ static int copy_msghdr_from_user(struct msghdr *kmsg,
 		kmsg->msg_namelen = 0;
 	}
 
-	if (nr_segs > UIO_MAXIOV)
+	if (msg.msg_iovlen > UIO_MAXIOV)
 		return -EMSGSIZE;
 
 	kmsg->msg_iocb = NULL;
 
-	return import_iovec(save_addr ? READ : WRITE, uiov, nr_segs,
+	return import_iovec(save_addr ? READ : WRITE,
+			    msg.msg_iov, msg.msg_iovlen,
 			    UIO_FASTIOV, iov, &kmsg->msg_iter);
 }
 
@@ -3378,6 +3390,19 @@ int kernel_sendpage(struct socket *sock, struct page *page, int offset,
 }
 EXPORT_SYMBOL(kernel_sendpage);
 
+int kernel_sendpage_locked(struct sock *sk, struct page *page, int offset,
+			   size_t size, int flags)
+{
+	struct socket *sock = sk->sk_socket;
+
+	if (sock->ops->sendpage_locked)
+		return sock->ops->sendpage_locked(sk, page, offset, size,
+						  flags);
+
+	return sock_no_sendpage_locked(sk, page, offset, size, flags);
+}
+EXPORT_SYMBOL(kernel_sendpage_locked);
+
 int kernel_sock_ioctl(struct socket *sock, int cmd, unsigned long arg)
 {
 	mm_segment_t oldfs = get_fs();
@@ -3407,7 +3432,6 @@ u32 kernel_sock_ip_overhead(struct sock *sk)
 	struct inet_sock *inet;
 	struct ip_options_rcu *opt;
 	u32 overhead = 0;
-	bool owned_by_user;
 #if IS_ENABLED(CONFIG_IPV6)
 	struct ipv6_pinfo *np;
 	struct ipv6_txoptions *optv6 = NULL;
@@ -3416,13 +3440,12 @@ u32 kernel_sock_ip_overhead(struct sock *sk)
 	if (!sk)
 		return overhead;
 
-	owned_by_user = sock_owned_by_user(sk);
 	switch (sk->sk_family) {
 	case AF_INET:
 		inet = inet_sk(sk);
 		overhead += sizeof(struct iphdr);
 		opt = rcu_dereference_protected(inet->inet_opt,
-						owned_by_user);
+						sock_owned_by_user(sk));
 		if (opt)
 			overhead += opt->opt.optlen;
 		return overhead;
@@ -3432,7 +3455,7 @@ u32 kernel_sock_ip_overhead(struct sock *sk)
 		overhead += sizeof(struct ipv6hdr);
 		if (np)
 			optv6 = rcu_dereference_protected(np->opt,
-							  owned_by_user);
+							  sock_owned_by_user(sk));
 		if (optv6)
 			overhead += (optv6->opt_flen + optv6->opt_nflen);
 		return overhead;
